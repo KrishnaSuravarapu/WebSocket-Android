@@ -11,8 +11,14 @@ import android.widget.Button;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.Socket;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.security.KeyManagementException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.cert.CertificateException;
@@ -22,29 +28,85 @@ import java.util.Arrays;
 import java.util.List;
 
 import javax.net.SocketFactory;
+import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
+import okhttp3.*;
+import okio.ByteString;
 
 public class MainActivity extends AppCompatActivity {
 
     boolean isConnected = false;
 
-    URI url;
+    String url;
+
+    Request request;
 
     WebSocketClient webSocket;
+
+    OkHttpClient webSocketClient;
+
+    WebSocketListener OkHTTPWebSocketListener;
+
+    WebSocket webSocketokhttp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        url = URI.create(getIntent().getStringExtra("server"));
-        Log.d("bsstack",String.format("Arg is %s", getIntent().getStringExtra("server")));
-        webSocket = new WebSocketClient(url){
+        url = getIntent().getStringExtra("server");
+        request = new Request.Builder().addHeader("Connection", "close").addHeader("content-type", "application/json").url(url).build();
 
+        try {
+            // Create a trust manager that does not validate certificate chains
+            final TrustManager[] trustAllCerts = new TrustManager[] {
+                    new X509TrustManager() {
+                        @Override
+                        public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
+                        }
+
+                        @Override
+                        public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
+                        }
+
+                        @Override
+                        public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                            return new java.security.cert.X509Certificate[]{};
+                        }
+                    }
+            };
+
+            // Install the all-trusting trust manager
+            final SSLContext sslContext = SSLContext.getInstance("SSL");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+            // Create an ssl socket factory with our all-trusting manager
+            final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+
+            OkHttpClient.Builder builder = new OkHttpClient.Builder();
+            builder.sslSocketFactory(sslSocketFactory, (X509TrustManager)trustAllCerts[0]);
+            builder.hostnameVerifier(new HostnameVerifier() {
+                @Override
+                public boolean verify(String hostname, SSLSession session) {
+                    return true;
+                }
+            });
+            builder.retryOnConnectionFailure(true);
+            webSocketClient = builder.build();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+
+            Log.d("bsstack",String.format("Arg is %s", getIntent().getStringExtra("server")));
+        OkHTTPWebSocketListener = new WebSocketListener() {
+            private static final int NORMAL_CLOSURE_STATUS = 1000;
             @Override
-            public void onOpen(ServerHandshake handshakedata) {
+            public void onOpen(WebSocket webSocket, Response response) {
+                webSocketokhttp = webSocket;
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -57,9 +119,8 @@ public class MainActivity extends AppCompatActivity {
                 });
                 Log.d("bsstack","Connected");
             }
-
             @Override
-            public void onMessage(String message) {
+            public void onMessage(WebSocket webSocket, String message) {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -70,11 +131,16 @@ public class MainActivity extends AppCompatActivity {
                         }
                     }
                 });
-                Log.d("bsstack",message);
+                Log.d("bsstack", "Receiving : " + message);
             }
-
             @Override
-            public void onClose(int code, String reason, boolean remote) {
+            public void onMessage(WebSocket webSocket, ByteString bytes) {
+                Log.d("bsstack", "Receiving bytes : " + bytes.hex());
+            }
+            @Override
+            public void onClosing(WebSocket webSocket, int code, String reason) {
+                webSocket.close(NORMAL_CLOSURE_STATUS, null);
+                webSocket.cancel();
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -85,31 +151,14 @@ public class MainActivity extends AppCompatActivity {
                         }
                     }
                 });
-                Log.d("bsstack",String.format("Closed due to %s", reason));
+                Log.d("bsstack", "Closing : " + code + " / " + reason);
             }
-
             @Override
-            public void onError(Exception ex) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        try{
-                            showAlertDialog("Error");
-                        } catch (Exception e){
-                            e.printStackTrace();
-                        }
-                    }
-                });
-                Log.d("bsstack",String.format("errored due to %s", ex.toString()));
+            public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                Log.d("bsstack", "Failure : " + t.getMessage());
             }
         };
-        try {
-            webSocket.setSocketFactory(fakeSocketFactory());
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        } catch (KeyManagementException e) {
-            e.printStackTrace();
-        }
+
     }
 
 
@@ -117,24 +166,23 @@ public class MainActivity extends AppCompatActivity {
         Button connectToggleBtn = (Button)findViewById(R.id.connectToggleBtn);
         String buttonText = connectToggleBtn.getText().toString();
         if(buttonText.equals("Connect")){
-            Log.d("bsstack", String.valueOf(webSocket.isFlushAndClose()));
             Log.d("bsstack", String.valueOf(url));
             connectToggleBtn.setText("Disconnect");
-            if(webSocket.isClosed()){
-                webSocket.reconnect();
-            }
-            else{
-                webSocket.connect();
-            }
+            webSocketClient.newWebSocket(request, OkHTTPWebSocketListener);
         }
         else {
             connectToggleBtn.setText("Connect");
-            webSocket.close();
+            try {
+                webSocketokhttp.close(1000, "Disconnect");
+            }
+            catch (Exception e){
+                Log.d("bsstack", e.toString());
+            }
         }
     }
 
     public void sendMessage(View view){
-        webSocket.send("Hey");
+        webSocketokhttp.send("Hey....");
     }
 
     public void showAlertDialog(String message) {
@@ -152,26 +200,4 @@ public class MainActivity extends AppCompatActivity {
         dialog.show();
     }
 
-    public SocketFactory fakeSocketFactory() throws NoSuchAlgorithmException, KeyManagementException {
-        X509TrustManager trustManager = new X509TrustManager() {
-            @Override
-            public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-            }
-
-            @Override
-            public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-
-            }
-
-            @Override
-            public X509Certificate[] getAcceptedIssuers() {
-                return new X509Certificate[0];
-            }
-        };
-        SSLContext sslContext = SSLContext.getInstance("SSL");
-        TrustManager[] list = new TrustManager[1];
-        list[0] = trustManager;
-        sslContext.init(null, list, new SecureRandom());
-        return sslContext.getSocketFactory();
-    }
 }
